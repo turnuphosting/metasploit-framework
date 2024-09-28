@@ -29,7 +29,8 @@ class Driver < Msf::Ui::Driver
     CommandDispatcher::Resource,
     CommandDispatcher::Db,
     CommandDispatcher::Creds,
-    CommandDispatcher::Developer
+    CommandDispatcher::Developer,
+    CommandDispatcher::DNS
   ]
 
   #
@@ -52,8 +53,6 @@ class Driver < Msf::Ui::Driver
   # @option opts [Boolean] 'AllowCommandPassthru' (true) Whether to allow
   #   unrecognized commands to be executed by the system shell
   # @option opts [Boolean] 'Readline' (true) Whether to use the readline or not
-  # @option opts [Boolean] 'RealReadline' (false) Whether to use the system's
-  #   readline library instead of RBReadline
   # @option opts [String] 'HistFile' (Msf::Config.history_file) Path to a file
   #   where we can store command history
   # @option opts [Array<String>] 'Resources' ([]) A list of resource files to
@@ -63,14 +62,30 @@ class Driver < Msf::Ui::Driver
   # @option opts [Boolean] 'SkipDatabaseInit' (false) Whether to skip
   #   connecting to the database and running migrations
   def initialize(prompt = DefaultPrompt, prompt_char = DefaultPromptChar, opts = {})
-    choose_readline(opts)
-
     histfile = opts['HistFile'] || Msf::Config.history_file
+
+    begin
+      FeatureManager.instance.load_config
+    rescue StandardError => e
+      elog(e)
+    end
+
+    if opts['DeferModuleLoads'].nil?
+      opts['DeferModuleLoads'] = Msf::FeatureManager.instance.enabled?(Msf::FeatureManager::DEFER_MODULE_LOADS)
+    end
 
     # Initialize attributes
 
-    # Defer loading of modules until paths from opts can be added below
-    framework_create_options = opts.merge('DeferModuleLoads' => true)
+    framework_create_options = opts.merge({ 'DeferModuleLoads' => true })
+
+    if Msf::FeatureManager.instance.enabled?(Msf::FeatureManager::DNS)
+      dns_resolver = Rex::Proto::DNS::CachedResolver.new
+      dns_resolver.extend(Rex::Proto::DNS::CustomNameserverProvider)
+      dns_resolver.load_config if dns_resolver.has_config?
+
+      # Defer loading of modules until paths from opts can be added below
+      framework_create_options = framework_create_options.merge({ 'CustomDnsResolver' => dns_resolver })
+    end
     self.framework = opts['Framework'] || Msf::Simple::Framework.create(framework_create_options)
 
     if self.framework.datastore['Prompt']
@@ -113,24 +128,10 @@ class Driver < Msf::Ui::Driver
     # stack
     enstack_dispatcher(CommandDispatcher::Core)
 
-    # Report readline error if there was one..
-    if !@rl_err.nil?
-      print_error("***")
-      print_error("* Unable to load readline: #{@rl_err}")
-      print_error("* Falling back to RbReadLine")
-      print_error("***")
-    end
-
     # Load the other "core" command dispatchers
     CommandDispatchers.each do |dispatcher_class|
       dispatcher = enstack_dispatcher(dispatcher_class)
       dispatcher.load_config(opts['Config'])
-    end
-
-    begin
-      FeatureManager.instance.load_config
-    rescue StandardException => e
-      elog(e)
     end
 
     if !framework.db || !framework.db.active
@@ -155,12 +156,12 @@ class Driver < Msf::Ui::Driver
     self.confirm_exit = opts['ConfirmExit']
 
     # Initialize the module paths only if we didn't get passed a Framework instance and 'DeferModuleLoads' is false
-    unless opts['Framework'] || opts['DeferModuleLoads']
+    unless opts['Framework']
       # Configure the framework module paths
-      self.framework.init_module_paths(module_paths: opts['ModulePath'])
+      self.framework.init_module_paths(module_paths: opts['ModulePath'], defer_module_loads: opts['DeferModuleLoads'])
     end
 
-    if framework.db && framework.db.active && framework.db.is_local? && !opts['DeferModuleLoads']
+    unless opts['DeferModuleLoads']
       framework.threads.spawn("ModuleCacheRebuild", true) do
         framework.modules.refresh_cache_from_module_files
       end
@@ -193,9 +194,23 @@ class Driver < Msf::Ui::Driver
     if restore_handlers
       print_status("Starting persistent handler(s)...")
 
-      restore_handlers.each do |handler_opts|
+      restore_handlers.each.with_index do |handler_opts, index|
         handler = framework.modules.create(handler_opts['mod_name'])
-        handler.exploit_simple(handler_opts['mod_options'])
+        handler.init_ui(self.input, self.output)
+        replicant_handler = nil
+        handler.exploit_simple(handler_opts['mod_options']) do |yielded_replicant_handler|
+          replicant_handler = yielded_replicant_handler
+        end
+
+        if replicant_handler.nil? || replicant_handler.error
+          print_status("Failed to start persistent payload handler ##{index} (#{handler_opts['mod_name']})")
+          next
+        end
+
+        if replicant_handler.error.nil?
+          job_id = handler.job_id
+          print_status "Persistent payload handler started as Job #{job_id}"
+        end
       end
     end
 
@@ -296,11 +311,11 @@ class Driver < Msf::Ui::Driver
   # Saves the recent history to the specified file
   #
   def save_recent_history(path)
-    num = Readline::HISTORY.length - hist_last_saved - 1
+    num = ::Reline::HISTORY.length - hist_last_saved - 1
 
     tmprc = ""
     num.times { |x|
-      tmprc << Readline::HISTORY[hist_last_saved + x] + "\n"
+      tmprc << ::Reline::HISTORY[hist_last_saved + x] + "\n"
     }
 
     if tmprc.length > 0
@@ -312,7 +327,7 @@ class Driver < Msf::Ui::Driver
 
     # Always update this, even if we didn't save anything. We do this
     # so that we don't end up saving the "makerc" command itself.
-    self.hist_last_saved = Readline::HISTORY.length
+    self.hist_last_saved = ::Reline::HISTORY.length
   end
 
   #
@@ -364,7 +379,25 @@ class Driver < Msf::Ui::Driver
 
     run_single("banner") unless opts['DisableBanner']
 
-    av_warning_message if framework.eicar_corrupted?
+    payloads_manifest_errors = []
+    begin
+      payloads_manifest_errors = ::MetasploitPayloads.manifest_errors if framework.features.enabled?(::Msf::FeatureManager::METASPLOIT_PAYLOAD_WARNINGS)
+    rescue ::StandardError => e
+      $stderr.print('Could not verify the integrity of the Metasploit Payloads manifest')
+      elog(e)
+    end
+
+    av_warning_message if (framework.eicar_corrupted? || payloads_manifest_errors.any?)
+
+    if framework.features.enabled?(::Msf::FeatureManager::METASPLOIT_PAYLOAD_WARNINGS)
+      if payloads_manifest_errors.any?
+        warn_msg = "Metasploit Payloads manifest errors:\n"
+        payloads_manifest_errors.each do |file|
+          warn_msg << "\t#{file[:path]} : #{file[:error]}\n"
+        end
+        $stderr.print(warn_msg)
+      end
+    end
 
     opts["Plugins"].each do |plug|
       run_single("load '#{plug}'")
@@ -524,10 +557,16 @@ protected
   def handle_session_logging(val)
     if (val =~ /^(y|t|1)/i)
       Msf::Logging.enable_session_logging(true)
-      print_line("Session logging will be enabled for future sessions.")
+      framework.sessions.values.each do |session|
+        Msf::Logging.start_session_log(session)
+      end
+      print_line("Session logging enabled.")
     else
       Msf::Logging.enable_session_logging(false)
-      print_line("Session logging will be disabled for future sessions.")
+      framework.sessions.values.each do |session|
+        Msf::Logging.stop_session_log(session)
+      end
+      print_line("Session logging disabled.")
     end
   end
 
@@ -650,44 +689,6 @@ protected
     end
 
     false
-  end
-
-  # Require the appropriate readline library based on the user's preference.
-  #
-  # @return [void]
-  def choose_readline(opts)
-    # Choose a readline library before calling the parent
-    @rl_err = nil
-    if opts['RealReadline']
-      # Remove the gem version from load path to be sure we're getting the
-      # stdlib readline.
-      gem_dir = Gem::Specification.find_all_by_name('rb-readline').first.gem_dir
-      rb_readline_path = File.join(gem_dir, "lib")
-      index = $LOAD_PATH.index(rb_readline_path)
-      # Bundler guarantees that the gem will be there, so it should be safe to
-      # assume we found it in the load path, but check to be on the safe side.
-      if index
-        $LOAD_PATH.delete_at(index)
-      end
-    end
-
-    begin
-      require 'readline'
-    rescue ::LoadError => e
-      if @rl_err.nil? && index
-        # Then this is the first time the require failed and we have an index
-        # for the gem version as a fallback.
-        @rl_err = e
-        # Put the gem back and see if that works
-        $LOAD_PATH.insert(index, rb_readline_path)
-        index = rb_readline_path = nil
-        retry
-      else
-        # Either we didn't have the gem to fall back on, or we failed twice.
-        # Nothing more we can do here.
-        raise e
-      end
-    end
   end
 end
 

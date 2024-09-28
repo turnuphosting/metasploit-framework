@@ -53,18 +53,18 @@ module Msf
             option_name = str.chop
             option_value = ''
 
-            ::Readline.completion_append_character = ' '
+            ::Reline.completion_append_character = ' '
             return tab_complete_option_values(mod, option_value, words, opt: option_name).map { |value| "#{str}#{value}" }
           elsif str.include?('=')
             str_split = str.split('=')
             option_name = str_split[0].strip
             option_value = str_split[1].strip
 
-            ::Readline.completion_append_character = ' '
+            ::Reline.completion_append_character = ' '
             return tab_complete_option_values(mod, option_value, words, opt: option_name).map { |value| "#{option_name}=#{value}" }
           end
 
-          ::Readline.completion_append_character = ''
+          ::Reline.completion_append_character = ''
           tab_complete_option_names(mod, str, words).map { |name| "#{name}=" }
         end
 
@@ -305,14 +305,14 @@ module Msf
         # Provide valid nops options for the current exploit
         #
         def option_values_nops
-          framework.nops.map { |refname, _mod| refname }
+          framework.nops.module_refnames
         end
 
         #
         # Provide valid encoders options for the current exploit or payload
         #
         def option_values_encoders
-          framework.encoders.map { |refname, _mod| refname }
+          framework.encoders.module_refnames
         end
 
         #

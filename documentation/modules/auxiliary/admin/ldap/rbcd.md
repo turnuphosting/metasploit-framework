@@ -32,7 +32,7 @@ Grant Write privileges for sandy to the target machine, i.e. `WS01`:
 $TargetComputer = Get-ADComputer 'WS01'
 $User = Get-ADUser 'sandy'
 
-# Add GenericWrite access to the user against the target coputer
+# Add GenericWrite access to the user against the target computer
 $Rights = [System.DirectoryServices.ActiveDirectoryRights] "GenericWrite"
 $ControlType = [System.Security.AccessControl.AccessControlType] "Allow"
 $InheritanceType = [System.DirectoryServices.ActiveDirectorySecurityInheritance] "All"
@@ -160,7 +160,7 @@ msf6 auxiliary(admin/dcerpc/samr_computer) > run
 msf6 auxiliary(admin/dcerpc/samr_computer) > use auxiliary/admin/ldap/rbcd
 ```
 
-Now use the RBCD module to read the the current value of `msDS-AllowedToActOnBehalfOfOtherIdentity`:
+Now use the RBCD module to read the current value of `msDS-AllowedToActOnBehalfOfOtherIdentity`:
 
 ```msf
 msf6 auxiliary(admin/ldap/rbcd) > set USERNAME sandy@msflab.local

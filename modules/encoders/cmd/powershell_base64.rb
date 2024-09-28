@@ -2,7 +2,7 @@
 # This module requires Metasploit: https://metasploit.com/download
 # Current source: https://github.com/rapid7/metasploit-framework
 ##
-
+include Msf::Post::Windows
 class MetasploitModule < Msf::Encoder
   Rank = ExcellentRanking
 
@@ -22,7 +22,6 @@ class MetasploitModule < Msf::Encoder
   # Encodes the payload
   #
   def encode_block(state, buf)
-
     # Skip encoding for empty badchars
     if state.badchars.length == 0
       return buf
@@ -45,7 +44,7 @@ class MetasploitModule < Msf::Encoder
   end
 
   def encode_buf(buf)
-    base64 = Rex::Text.encode_base64(Rex::Text.to_unicode("cmd.exe /c start #{buf}"))
+    base64 = Rex::Text.encode_base64(Rex::Text.to_unicode("cmd.exe /c '#{Msf::Post::Windows.escape_powershell_literal(buf)}'"))
     cmd = "powershell -w hidden -nop -e #{base64}"
   end
 end

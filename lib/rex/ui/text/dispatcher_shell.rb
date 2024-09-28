@@ -2,6 +2,7 @@
 require 'pp'
 require 'rex/text/table'
 require 'erb'
+require 'readline'
 
 module Rex
 module Ui
@@ -232,6 +233,7 @@ module DispatcherShell
     #
     # Return a pretty, user-readable table of commands provided by this
     # dispatcher.
+    # The command column width can be modified by passing in :command_width.
     #
     def help_to_s(opts={})
       # If this dispatcher has no commands, we can't do anything useful.
@@ -250,7 +252,7 @@ module DispatcherShell
           {
             'Command' =>
               {
-                'Width' => 12
+                'Width' => opts[:command_width]
               }
           })
 
@@ -310,7 +312,7 @@ module DispatcherShell
         # This is annoying if we're recursively tab-traversing our way through subdirectories -
         # we may want to continue traversing, but MSF will add a space, requiring us to back up to continue
         # tab-completing our way through successive subdirectories.
-        ::Readline.completion_append_character = nil
+        ::Reline.completion_append_character = nil
       end
 
       if dirs.length == 0 && File.directory?(str)
@@ -393,7 +395,7 @@ module DispatcherShell
   def initialize(prompt, prompt_char = '>', histfile = nil, framework = nil, name = nil)
     super
 
-    # Initialze the dispatcher array
+    # Initialize the dispatcher array
     self.dispatcher_stack = []
 
     # Initialize the tab completion array
@@ -405,11 +407,16 @@ module DispatcherShell
   # routine, stores all completed words, and passes the partial
   # word to the real tab completion function. This works around
   # a design problem in the Readline module and depends on the
-  # Readline.basic_word_break_characters variable being set to \x00
+  # Reline.basic_word_break_characters variable being set to \x00
   #
-  def tab_complete(str)
-    ::Readline.completion_append_character = ' '
-    ::Readline.completion_case_fold = false
+  def tab_complete(str, opts: {})
+    # Compatibility with how Readline worked before Reline
+    if opts[:preposing]
+      str = "#{opts[:preposing]}#{str}"
+    end
+
+    ::Reline.completion_append_character = ' '
+    ::Reline.completion_case_fold = false
 
     # Check trailing whitespace so we can tell 'x' from 'x '
     str_match = str.match(/[^\\]([\\]{2})*\s+$/)
@@ -423,11 +430,7 @@ module DispatcherShell
 
     # Pop the last word and pass it to the real method
     result = tab_complete_stub(str, split_str)
-    if result
-      result.uniq
-    else
-      result
-    end
+    result&.uniq
   end
 
   # Performs tab completion of a command, if supported
@@ -588,7 +591,15 @@ module DispatcherShell
   # If the command is unknown...
   #
   def unknown_command(method, line)
-    print_error("Unknown command: #{method}")
+    # Map each dispatchers commands to valid_commands
+    valid_commands = dispatcher_stack.flat_map { |dispatcher| dispatcher.commands.keys }
+
+    message = "Unknown command: #{method}."
+    suggestion = DidYouMean::SpellChecker.new(dictionary: valid_commands).correct(method).first
+    message << " Did you mean %grn#{suggestion}%clr?" if suggestion
+    message << ' Run the %grnhelp%clr command for more details.'
+
+    print_error(message)
   end
 
   #
@@ -648,11 +659,13 @@ module DispatcherShell
   def help_to_s(opts = {})
     str = ''
 
+    max_command_length = dispatcher_stack.flat_map { |dispatcher| dispatcher.commands.to_a }.map { |(name, _description)| name.length }.max
+
     dispatcher_stack.reverse.each { |dispatcher|
-      str << dispatcher.help_to_s
+      str << dispatcher.help_to_s(opts.merge({ command_width: [max_command_length, 12].max }))
     }
 
-    return str
+    return str << "For more info on a specific command, use %grn<command> -h%clr or %grnhelp <command>%clr.\n\n"
   end
 
 
